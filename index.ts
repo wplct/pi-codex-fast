@@ -4,29 +4,19 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { type Api, type Model } from "@earendil-works/pi-ai";
 import {
-  streamOpenAICodexResponses,
-  streamOpenAIResponses,
-  streamSimpleOpenAICodexResponses,
-  streamSimpleOpenAIResponses,
-  type Api,
-  type AssistantMessageEventStream,
-  type Context,
-  type Model,
-  type SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
-import {
-  createFastModeStream,
   describeFastMode,
   getFastCommandArgumentCompletions,
   getFastStatusFrame,
   getNextFastModeStyle,
   loadPiFastModeConfig,
   parseFastCommand,
+  patchFastModePayload,
+  resolveFastServiceTier,
   savePiFastModeConfig,
   shouldApplyFastMode,
   STATUS_KEY,
-  type FastModeStreamers,
   type PiFastModeConfig,
   type SchedulerLike,
 } from "./utils";
@@ -36,7 +26,6 @@ export * from "./utils";
 export interface PiFastModeDeps {
   agentDir?: string;
   scheduler?: SchedulerLike;
-  streamers?: Partial<FastModeStreamers>;
 }
 
 type SupportedModel = Pick<
@@ -44,19 +33,6 @@ type SupportedModel = Pick<
   "provider" | "id" | "api" | "maxTokens" | "reasoning" | "thinkingLevelMap"
 >;
 type StatusContext = Pick<ExtensionContext, "cwd" | "hasUI" | "model" | "ui">;
-const DEFAULT_STREAMERS: FastModeStreamers = {
-  streamOpenAIResponses,
-  streamSimpleOpenAIResponses,
-  streamOpenAICodexResponses,
-  streamSimpleOpenAICodexResponses,
-};
-
-function mergeStreamers(overrides: Partial<FastModeStreamers> | undefined): FastModeStreamers {
-  return {
-    ...DEFAULT_STREAMERS,
-    ...overrides,
-  };
-}
 
 export function createPiFastModeExtension(pi: ExtensionAPI, deps: PiFastModeDeps = {}) {
   const agentDir = deps.agentDir ?? getAgentDir();
@@ -66,7 +42,6 @@ export function createPiFastModeExtension(pi: ExtensionAPI, deps: PiFastModeDeps
     clearInterval: (handle: unknown) =>
       globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
   };
-  const streamers = mergeStreamers(deps.streamers);
 
   let config: PiFastModeConfig = loadPiFastModeConfig(agentDir);
   let currentModel: SupportedModel | undefined;
@@ -124,32 +99,6 @@ export function createPiFastModeExtension(pi: ExtensionAPI, deps: PiFastModeDeps
     if (ctx.hasUI) ctx.ui.notify(message, kind);
   };
 
-  const fastModeStream = createFastModeStream({
-    streamers,
-    getConfig: refreshConfig,
-  });
-
-  const streamSimple = (
-    model: Model<Api>,
-    context: Context,
-    options?: SimpleStreamOptions,
-  ): AssistantMessageEventStream => {
-    return fastModeStream(model, context, options);
-  };
-
-  // This registers wrappers for the OpenAI Responses APIs. Pi's API registry is keyed by API name,
-  // so the wrapper deliberately falls through to the original simple streamers unless the provider
-  // and model are explicitly configured for Fast Mode.
-  pi.registerProvider("openai", {
-    api: "openai-responses",
-    streamSimple,
-  });
-
-  pi.registerProvider("openai-codex", {
-    api: "openai-codex-responses",
-    streamSimple,
-  });
-
   pi.on("session_start", async (_event, ctx) => {
     currentModel = ctx.model as SupportedModel | undefined;
     syncStatus(ctx);
@@ -160,6 +109,18 @@ export function createPiFastModeExtension(pi: ExtensionAPI, deps: PiFastModeDeps
     syncStatus(ctx);
   });
 
+  pi.on("before_provider_request", (event, ctx) => {
+    currentModel = (ctx.model as SupportedModel | undefined) ?? currentModel;
+    refreshConfig();
+    syncStatus(ctx);
+
+    const serviceTier = resolveFastServiceTier(config, currentModel);
+    if (!serviceTier) return;
+
+    // 以配置文件为准：命中 models 的请求在发出前直接补上 service_tier。
+    return patchFastModePayload(event.payload, serviceTier);
+  });
+
   pi.on("session_shutdown", async () => {
     stopAnimation();
     statusCtx?.ui.setStatus(STATUS_KEY, undefined);
@@ -167,7 +128,7 @@ export function createPiFastModeExtension(pi: ExtensionAPI, deps: PiFastModeDeps
   });
 
   pi.registerCommand("fast", {
-    description: "Toggle OpenAI/Codex Fast Mode and style.",
+    description: "Toggle Fast Mode and style.",
     getArgumentCompletions: getFastCommandArgumentCompletions,
     handler: async (args, ctx) => {
       currentModel = ctx.model as SupportedModel | undefined;

@@ -1,7 +1,7 @@
 {
   "name": "pi-codex-fast",
   "version": "1.1.0",
-  "description": "Fast mode toggle for OpenAI and Codex models in pi.",
+  "description": "Fast mode toggle for configured pi models.",
   "keywords": [
     "codex",
     "openai",
@@ -9,15 +9,15 @@
     "pi-extension",
     "pi-package"
   ],
-  "homepage": "https://github.com/wobondar/pi-codex-fast#readme",
+  "homepage": "https://github.com/wplct/pi-codex-fast#readme",
   "bugs": {
-    "url": "https://github.com/wobondar/pi-codex-fast/issues"
+    "url": "https://github.com/wplct/pi-codex-fast/issues"
   },
   "license": "MIT",
   "author": "wobondar",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wobondar/pi-codex-fast.git"
+    "url": "git+https://github.com/wplct/pi-codex-fast.git"
   },
   "files": [
     "index.ts",

@@ -2,25 +2,23 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
-import type { Context, Model } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import piFastModeExtension, { createPiFastModeExtension } from "../index";
 import {
   DEFAULT_CONFIG,
-  buildOpenAICodexResponsesFastOptions,
-  buildOpenAIResponsesFastOptions,
-  createFastModeStream,
+  describeFastMode,
   getFastCommandArgumentCompletions,
   getFastStatusFrame,
   getNextFastModeStyle,
   isConfiguredFastModel,
   loadPiFastModeConfig,
-  mapReasoningEffort,
   mergeConfig,
   normalizeFastModels,
   parseFastCommand,
+  patchFastModePayload,
+  resolveFastServiceTier,
   savePiFastModeConfig,
   shouldApplyFastMode,
-  type FastModeStreamers,
   type PiFastModeConfig,
 } from "../utils";
 
@@ -43,21 +41,6 @@ function model(partial: Partial<Model<any>>): Model<any> {
     maxTokens: 128000,
     ...partial,
   } as Model<any>;
-}
-
-function makeStreamers(
-  calls: Array<{ name: string; options: unknown; model: Model<any> }>,
-): FastModeStreamers {
-  const record = (name: string) => (m: Model<any>, _context: Context, options?: unknown) => {
-    calls.push({ name, options, model: m });
-    return { name, options } as any;
-  };
-  return {
-    streamOpenAIResponses: record("streamOpenAIResponses") as any,
-    streamSimpleOpenAIResponses: record("streamSimpleOpenAIResponses") as any,
-    streamOpenAICodexResponses: record("streamOpenAICodexResponses") as any,
-    streamSimpleOpenAICodexResponses: record("streamSimpleOpenAICodexResponses") as any,
-  };
 }
 
 test("normalizes fast model refs", () => {
@@ -90,12 +73,7 @@ test("creates, saves, and loads config under the pi agent extensions directory",
 
     const loaded = loadPiFastModeConfig(agentDir);
     expect(loaded.enabled).toBe(false);
-    expect(loaded.models).toEqual([
-      "openai/gpt-5.4",
-      "openai/gpt-5.5",
-      "openai-codex/gpt-5.4",
-      "openai-codex/gpt-5.5",
-    ]);
+    expect(loaded.models).toEqual(["openai/gpt-5.4", "openai/gpt-5.5"]);
     expect(loaded.style).toBe("static");
 
     const defaultRaw = JSON.parse(readFileSync(configPath, "utf8"));
@@ -108,11 +86,11 @@ test("creates, saves, and loads config under the pi agent extensions directory",
     expect(enabledRaw.enabled).toBe(true);
 
     const saved = savePiFastModeConfig(
-      { enabled: true, models: ["openai-codex/gpt-5.5"], style: "glow" },
+      { enabled: true, models: ["cc-switch/gpt-5.5"], style: "glow" },
       agentDir,
     );
     expect(saved.enabled).toBe(true);
-    expect(saved.models).toEqual(["openai-codex/gpt-5.5"]);
+    expect(saved.models).toEqual(["cc-switch/gpt-5.5"]);
     expect(loadPiFastModeConfig(agentDir).style).toBe("glow");
     const raw = JSON.parse(readFileSync(configPath, "utf8"));
     expect(raw.style).toBe("glow");
@@ -121,104 +99,55 @@ test("creates, saves, and loads config under the pi agent extensions directory",
   }
 });
 
-test("matches bare and provider-qualified configured models", () => {
+test("matches bare and provider-qualified configured models using config only", () => {
   const config: PiFastModeConfig = {
     ...DEFAULT_CONFIG,
     enabled: true,
-    models: ["gpt-5.5", "openai/gpt-5.4"],
+    models: ["gpt-5.5", "cc-switch/gpt-5.4"],
   };
   expect(isConfiguredFastModel(config, model({ provider: "openai-codex", id: "gpt-5.5" }))).toBe(
     true,
   );
-  expect(isConfiguredFastModel(config, model({ provider: "openai", id: "gpt-5.4" }))).toBe(true);
-  expect(isConfiguredFastModel(config, model({ provider: "openai-codex", id: "gpt-5.4" }))).toBe(
+  expect(isConfiguredFastModel(config, model({ provider: "cc-switch", id: "gpt-5.4" }))).toBe(
+    true,
+  );
+  expect(isConfiguredFastModel(config, model({ provider: "openai", id: "gpt-5.4" }))).toBe(
     false,
   );
   expect(
-    shouldApplyFastMode(
-      { ...config, enabled: false },
-      model({ provider: "openai-codex", id: "gpt-5.5" }),
-    ),
+    shouldApplyFastMode({ ...config, enabled: false }, model({ provider: "cc-switch", id: "gpt-5.5" })),
   ).toBe(false);
 });
 
-test("maps reasoning with Pi's clampThinkingLevel behavior", () => {
-  expect(mapReasoningEffort(model({ reasoning: false }), "high")).toBeUndefined();
-  expect(mapReasoningEffort(model({ id: "gpt-5.1" }), "xhigh")).toBe("high");
-  expect(
-    mapReasoningEffort(model({ id: "gpt-5.5", thinkingLevelMap: { xhigh: "xhigh" } }), "xhigh"),
-  ).toBe("xhigh");
-});
-
-test("builds native OpenAI Responses options with service tier and reasoning clamp", () => {
-  const opts = buildOpenAIResponsesFastOptions(
-    model({ api: "openai-responses", provider: "openai", id: "gpt-5.1" }),
-    { apiKey: "k", reasoning: "xhigh", maxRetries: 0, sessionId: "sid" },
-    "priority",
-  );
-  expect(opts.serviceTier).toBe("priority");
-  expect(opts.reasoningEffort).toBe("high");
-  expect(opts.apiKey).toBe("k");
-  expect(opts.maxRetries).toBe(0);
-  expect(opts.sessionId).toBe("sid");
-  expect(opts.maxTokens).toBe(32000);
-
-  const codexOpts = buildOpenAICodexResponsesFastOptions(
-    model({
-      api: "openai-codex-responses",
-      provider: "openai-codex",
-      id: "gpt-5.5",
-      thinkingLevelMap: { xhigh: "xhigh" },
-    }),
-    { reasoning: "xhigh" },
-    "priority",
-  );
-  expect(codexOpts.reasoningEffort).toBe("xhigh");
-
-  const noReasoningCodexOpts = buildOpenAICodexResponsesFastOptions(
-    model({ api: "openai-codex-responses", provider: "openai-codex", reasoning: false }),
-    { reasoning: "high" },
-    "priority",
-  );
-  expect(noReasoningCodexOpts.reasoningEffort).toBeUndefined();
-});
-
-test("native stream is used only for configured OpenAI/Codex fast requests", () => {
-  const calls: Array<{ name: string; options: unknown; model: Model<any> }> = [];
-  const decisions: unknown[] = [];
+test("resolves service tier from config and patches provider payload", () => {
   const config: PiFastModeConfig = {
     ...DEFAULT_CONFIG,
     enabled: true,
-    models: ["openai-codex/gpt-5.5"],
+    models: ["cc-switch/gpt-5.4"],
   };
-  const stream = createFastModeStream({
-    streamers: makeStreamers(calls),
-    getConfig: () => config,
-    onDecision: (decision) => decisions.push(decision),
+  const currentModel = model({ provider: "cc-switch", id: "gpt-5.4", api: "openai-responses" });
+  expect(resolveFastServiceTier(config, currentModel)).toBe("priority");
+
+  const originalPayload = { model: "gpt-5.4", input: "hi" };
+  expect(patchFastModePayload(originalPayload, "priority")).toEqual({
+    model: "gpt-5.4",
+    input: "hi",
+    service_tier: "priority",
   });
+  expect(patchFastModePayload("raw-payload", "priority")).toBe("raw-payload");
+  expect(patchFastModePayload(originalPayload, undefined)).toEqual(originalPayload);
+});
 
-  stream(
-    model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5.5" }),
-    { messages: [] },
-    { reasoning: "high" },
+test("describeFastMode reflects configured scope", () => {
+  const config: PiFastModeConfig = {
+    ...DEFAULT_CONFIG,
+    enabled: true,
+    models: ["cc-switch/gpt-5.4"],
+  };
+  expect(describeFastMode(config, model({ provider: "cc-switch", id: "gpt-5.4" }))).toContain(
+    "cc-switch/gpt-5.4",
   );
-  expect(calls.at(-1)?.name).toBe("streamOpenAICodexResponses");
-  expect((calls.at(-1)!.options as any).serviceTier).toBe("priority");
-
-  stream(
-    model({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5.4" }),
-    { messages: [] },
-    { reasoning: "high" },
-  );
-  expect(calls.at(-1)?.name).toBe("streamSimpleOpenAICodexResponses");
-
-  stream(
-    model({ provider: "github-copilot", api: "openai-responses", id: "gpt-5.5" }),
-    { messages: [] },
-    { reasoning: "high" },
-  );
-  expect(calls.at(-1)?.name).toBe("streamSimpleOpenAIResponses");
-  expect((decisions.at(-1) as any).applied).toBe(false);
+  expect(describeFastMode(config, model({ provider: "other", id: "other" }))).toContain("1 model");
 });
 
 test("commands, completions, styles, and status frames", () => {

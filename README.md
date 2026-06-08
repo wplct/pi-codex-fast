@@ -1,6 +1,6 @@
 # pi-codex-fast
 
-Fast Mode extension for [pi](https://pi.dev) that toggles OpenAI/Codex priority service tier for configured models.
+Fast Mode extension for [pi](https://pi.dev) that toggles priority service tier for configured models.
 
 Requires pi 0.74.0 or newer.
 
@@ -35,15 +35,21 @@ The extension adds the `/fast` command:
 /fast style    Cycle the footer status style
 ```
 
-When enabled, requests for configured OpenAI/OpenAI Codex models use `serviceTier: "priority"`.
+When enabled, requests for configured models are patched with `service_tier: "priority"` before they are sent.
 
 ## How it works
 
-`pi-codex-fast` registers provider wrappers for pi's OpenAI Responses and OpenAI Codex Responses APIs.
+`pi-codex-fast` reads `~/.pi/agent/extensions/pi-codex-fast.json` and uses that config as the source of truth.
 
-For configured models, the wrapper calls the native provider streamer with `serviceTier: "priority"`. For all other models, providers, or disabled Fast Mode, it falls through to pi's normal simple streamers unchanged.
+If the current model matches the configured `models` list and `enabled` is `true`, the extension uses Pi's `before_provider_request` hook to patch the outgoing provider payload with:
 
-The extension intentionally does **not** use the `before_provider_request` hook to patch request payloads. That preserves pi's native provider flow, including pi's built-in usage and cost calculation.
+```json
+{
+  "service_tier": "priority"
+}
+```
+
+This means model matching is driven by the config file, not by a hard-coded provider whitelist.
 
 ## Configuration
 
@@ -60,13 +66,26 @@ Default config:
 ```json
 {
   "enabled": false,
-  "models": ["openai/gpt-5.4", "openai/gpt-5.5", "openai-codex/gpt-5.4", "openai-codex/gpt-5.5"]
+  "models": ["openai/gpt-5.4", "openai/gpt-5.5"]
 }
 ```
 
 Optional fields such as `style` are resolved internally and only written when changed via `/fast style`.
 
-Model entries may be provider-qualified, for example `openai/gpt-5.5`, or bare model IDs, for example `gpt-5.5`.
+Model entries may be provider-qualified, for example `cc-switch/gpt-5.4`, or bare model IDs, for example `gpt-5.4`.
+
+Examples:
+
+```json
+{
+  "enabled": true,
+  "models": [
+    "cc-switch/gpt-5.4",
+    "cc-switch/gpt-5.5",
+    "gpt-5.3-codex"
+  ]
+}
+```
 
 ## License
 

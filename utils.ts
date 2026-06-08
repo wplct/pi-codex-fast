@@ -1,22 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import {
-  clampThinkingLevel,
-  type Api,
-  type AssistantMessageEventStream,
-  type Context,
-  type Model,
-  type OpenAICodexResponsesOptions,
-  type OpenAIResponsesOptions,
-  type SimpleStreamOptions,
-  type ThinkingLevel,
-} from "@earendil-works/pi-ai";
+import { type Api, type Model } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
 export type FastModeStyle = "static" | "rainbow" | "glow";
 export type FastServiceTier = "priority" | undefined;
-export type SupportedProvider = "openai" | "openai-codex";
 export type JsonObject = Record<string, unknown>;
 
 export interface PiFastModeConfig {
@@ -30,29 +19,6 @@ export interface SchedulerLike {
   clearInterval(handle: unknown): void;
 }
 
-export interface FastModeStreamers {
-  streamOpenAIResponses: (
-    model: Model<"openai-responses">,
-    context: Context,
-    options?: OpenAIResponsesOptions,
-  ) => AssistantMessageEventStream;
-  streamSimpleOpenAIResponses: (
-    model: Model<"openai-responses">,
-    context: Context,
-    options?: SimpleStreamOptions,
-  ) => AssistantMessageEventStream;
-  streamOpenAICodexResponses: (
-    model: Model<"openai-codex-responses">,
-    context: Context,
-    options?: OpenAICodexResponsesOptions,
-  ) => AssistantMessageEventStream;
-  streamSimpleOpenAICodexResponses: (
-    model: Model<"openai-codex-responses">,
-    context: Context,
-    options?: SimpleStreamOptions,
-  ) => AssistantMessageEventStream;
-}
-
 export interface FastModeStreamDecision {
   provider: string;
   model: string;
@@ -62,20 +28,9 @@ export interface FastModeStreamDecision {
   native: boolean;
 }
 
-export interface CreateFastModeStreamOptions {
-  streamers: FastModeStreamers;
-  getConfig: () => PiFastModeConfig;
-  onDecision?: (decision: FastModeStreamDecision) => void;
-}
-
 export const PACKAGE_NAME = "pi-codex-fast";
 export const STATUS_KEY = "pi-fast-mode";
-export const DEFAULT_FAST_MODELS = [
-  "openai/gpt-5.4",
-  "openai/gpt-5.5",
-  "openai-codex/gpt-5.4",
-  "openai-codex/gpt-5.5",
-] as const;
+export const DEFAULT_FAST_MODELS = ["openai/gpt-5.4", "openai/gpt-5.5"] as const;
 export const DEFAULT_CONFIG: PiFastModeConfig = {
   enabled: false,
   models: [...DEFAULT_FAST_MODELS],
@@ -85,7 +40,6 @@ export const DEFAULT_CONFIG_FILE = {
   enabled: DEFAULT_CONFIG.enabled,
   models: [...DEFAULT_FAST_MODELS],
 };
-export const FAST_PROVIDERS = new Set<SupportedProvider>(["openai", "openai-codex"]);
 export const FAST_MODE_STYLES: readonly FastModeStyle[] = ["static", "rainbow", "glow"] as const;
 
 const FAST_COMMAND_COMPLETIONS: readonly AutocompleteItem[] = [
@@ -239,16 +193,11 @@ export function normalizeModelRef(ref: string): string {
   return ref.trim().toLowerCase();
 }
 
-export function isFastProvider(provider: unknown): provider is SupportedProvider {
-  return provider === "openai" || provider === "openai-codex";
-}
-
 export function isConfiguredFastModel(
   config: PiFastModeConfig,
   model: Pick<Model<Api>, "provider" | "id"> | undefined,
 ): boolean {
   if (!model) return false;
-  if (!isFastProvider(model.provider)) return false;
   const bare = normalizeModelRef(model.id);
   const full = normalizeModelRef(`${model.provider}/${model.id}`);
   return config.models.some((entry) => entry === bare || entry === full);
@@ -266,6 +215,14 @@ export function resolveFastServiceTier(
   model: Pick<Model<Api>, "provider" | "id"> | undefined,
 ): FastServiceTier {
   return shouldApplyFastMode(config, model) ? "priority" : undefined;
+}
+
+export function patchFastModePayload(payload: unknown, serviceTier: FastServiceTier): unknown {
+  if (!serviceTier || !isRecord(payload)) return payload;
+  return {
+    ...payload,
+    service_tier: serviceTier,
+  };
 }
 
 export function getFastStatusFrame(frameIndex: number, style: FastModeStyle = "glow"): string {
@@ -317,125 +274,4 @@ export function describeFastMode(
     ? `${model?.provider}/${model?.id}`
     : `${config.models.length} model${config.models.length === 1 ? "" : "s"}`;
   return `Fast Mode ${config.enabled ? "ON" : "OFF"} (${scope}, style=${config.style})`;
-}
-
-function defaultMaxTokens(model: Pick<Model<Api>, "maxTokens">): number | undefined {
-  return model.maxTokens > 0 ? Math.min(model.maxTokens, 32000) : undefined;
-}
-
-export function mapReasoningEffort(
-  model: Model<Api>,
-  reasoning: ThinkingLevel | undefined,
-): ThinkingLevel | undefined {
-  const clampedReasoning = reasoning ? clampThinkingLevel(model, reasoning) : undefined;
-  return clampedReasoning === "off" ? undefined : clampedReasoning;
-}
-
-function buildBaseProviderOptions(
-  model: Pick<Model<Api>, "maxTokens">,
-  options: SimpleStreamOptions | undefined,
-) {
-  return {
-    temperature: options?.temperature,
-    maxTokens: options?.maxTokens ?? defaultMaxTokens(model),
-    signal: options?.signal,
-    apiKey: options?.apiKey,
-    transport: options?.transport,
-    cacheRetention: options?.cacheRetention,
-    sessionId: options?.sessionId,
-    onPayload: options?.onPayload,
-    onResponse: options?.onResponse,
-    headers: options?.headers,
-    timeoutMs: options?.timeoutMs,
-    maxRetries: options?.maxRetries,
-    maxRetryDelayMs: options?.maxRetryDelayMs,
-    metadata: options?.metadata,
-  };
-}
-
-export function buildOpenAIResponsesFastOptions(
-  model: Model<Api>,
-  options: SimpleStreamOptions | undefined,
-  serviceTier: FastServiceTier,
-): OpenAIResponsesOptions {
-  return {
-    ...buildBaseProviderOptions(model, options),
-    reasoningEffort: mapReasoningEffort(
-      model,
-      options?.reasoning,
-    ) as OpenAIResponsesOptions["reasoningEffort"],
-    serviceTier,
-  };
-}
-
-export function buildOpenAICodexResponsesFastOptions(
-  model: Model<Api>,
-  options: SimpleStreamOptions | undefined,
-  serviceTier: FastServiceTier,
-): OpenAICodexResponsesOptions {
-  return {
-    ...buildBaseProviderOptions(model, options),
-    reasoningEffort: mapReasoningEffort(
-      model,
-      options?.reasoning,
-    ) as OpenAICodexResponsesOptions["reasoningEffort"],
-    serviceTier,
-  };
-}
-
-export function createFastModeStream({
-  streamers,
-  getConfig,
-  onDecision,
-}: CreateFastModeStreamOptions) {
-  return (
-    model: Model<Api>,
-    context: Context,
-    options?: SimpleStreamOptions,
-  ): AssistantMessageEventStream => {
-    const config = getConfig();
-    const serviceTier = resolveFastServiceTier(config, model);
-    const applied = serviceTier !== undefined;
-
-    onDecision?.({
-      provider: model.provider,
-      model: model.id,
-      api: model.api,
-      serviceTier,
-      applied,
-      native: applied,
-    });
-
-    if (model.api === "openai-responses") {
-      if (applied) {
-        return streamers.streamOpenAIResponses(
-          model as Model<"openai-responses">,
-          context,
-          buildOpenAIResponsesFastOptions(model, options, serviceTier),
-        );
-      }
-      return streamers.streamSimpleOpenAIResponses(
-        model as Model<"openai-responses">,
-        context,
-        options,
-      );
-    }
-
-    if (model.api === "openai-codex-responses") {
-      if (applied) {
-        return streamers.streamOpenAICodexResponses(
-          model as Model<"openai-codex-responses">,
-          context,
-          buildOpenAICodexResponsesFastOptions(model, options, serviceTier),
-        );
-      }
-      return streamers.streamSimpleOpenAICodexResponses(
-        model as Model<"openai-codex-responses">,
-        context,
-        options,
-      );
-    }
-
-    throw new Error(`pi-fast-mode: unsupported API for provider override: ${String(model.api)}`);
-  };
 }
